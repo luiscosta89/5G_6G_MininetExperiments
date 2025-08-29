@@ -547,7 +547,7 @@ def topology(duration=30):
     server = _start_h1_owd_responder(h1, port=12345)
 
     # Launch experiment only for stations that have a paired IP
-    paired_stations = [sta for sta in stations if sta.name in sta_to_h1_ip]
+    # paired_stations = [sta for sta in stations if sta.name in sta_to_h1_ip]
     
     exp_thread = threading.Thread(
         target=udp_experiment,
