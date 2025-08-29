@@ -1,14 +1,18 @@
 from mn_wifi.net import Mininet_wifi
-from mn_wifi.node import OVSKernelAP
+from mn_wifi.node import Controller, OVSKernelAP
 from mn_wifi.cli import CLI
-from mn_wifi.net import Mininet_wifi
+from mn_wifi.link import wmediumd
 from mn_wifi.wmediumdConnector import interference
-#from mn_wifi.mobility import mobility
-import random, sys, threading, time, re, csv
+from mn_wifi.propagationModels import PropagationModel
+from mn_wifi.mobility import mobility
+import random
+import threading
+import time
 import matplotlib.pyplot as plt
 import numpy as np
+import re, csv
 from math import sqrt
-from dqfanet import QFANET_DQN_Agent, qfanet_dqn_routing
+from dqfanet_routing import QFANET_DQN_Agent, qfanet_dqn_routing
 
 num_stations_ap1 = 13
 num_stations_ap2 = 12
@@ -109,8 +113,8 @@ def select_next_hop(agent, src, neighbors, previous_latency, destination):
     state = np.array([src.position[0], src.position[1], avg_signal_strength, queue_length])
     return qfanet_dqn_routing(agent, state, src, neighbors, previous_latency, destination, latency_measure_func)
 
-def topology(mobility):
-    net = Mininet_wifi(controller=None, accessPoint=OVSKernelAP)
+def topology():
+    net = Mininet_wifi(controller=Controller, link=wmediumd, wmediumd_mode=interference)
 
     stations = [net.addStation(f'sta{i+1}', position=f"{random.randint(10, 490)},{random.randint(10, 490)},0") for i in range(25)]
 
@@ -135,17 +139,16 @@ def topology(mobility):
             net.addLink(station, h3)
 
     net.configureWifiNodes()
-    net.setPropagationModel(model="logDistance", exp=4.5)
+    PropagationModel(model="logDistance", exp=4)
 
+    c0 = net.addController('c0')
     net.build()
+    c0.start()
     # ap1.start([c0])
     # ap2.start([c0])
     # ap3.start([c0])
 
-    print("Starting mobility...")
-    
-    if mobility:
-        net.setMobilityModel(time=0, model='RandomDirection', max_x=500, max_y=500, min_v=0.5, max_v=1.0, seed=20)
+    mobility(stations, model='RandomDirection', max_x=500, max_y=500, min_v=0.5, max_v=1.0)
 
     agent = QFANET_DQN_Agent(state_dim=4, action_dim=10)
 
@@ -163,7 +166,7 @@ def experiment(agent, stations, destination):
     clusters = [stations[i:i+5] for i in range(0, len(stations), 5)]
 
     for cluster in clusters:
-        cluster_head = select_cluster_heads_by_signal_strength(stations, cluster)
+        cluster_head = select_cluster_head(cluster)
 
         for sta in cluster:
             if sta == cluster_head:
@@ -218,6 +221,4 @@ def plot_results(timestamps, delays, jitters, throughputs):
     plt.show()
 
 if __name__ == '__main__':
-    mobility = True if '-m' in sys.argv else False
-    topology(mobility)
-
+    topology()

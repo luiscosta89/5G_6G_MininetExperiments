@@ -1,22 +1,42 @@
-import torch
+import torch, threading, sys
 import numpy as np
-import random
-import time
-import json
-import re
+import matplotlib.pyplot as plt
+import random, time, json, re, csv
 from mn_wifi.net import Mininet_wifi
 from mn_wifi.node import OVSKernelAP
 from mn_wifi.cli import CLI
 from mn_wifi.wmediumdConnector import interference
-from Ddpg_Routing_Fanet import DDPGAgent, ddpg_routing  # Import DDPG module
+from ddpg import DDPGAgent, ddpg_routing  # Import DDPG module
 
 # Initialize DDPG agent
 state_dim = 4  # Example state dimensions (position, average signal strength, queue length, etc.)
 action_dim = 3  # Example action space (choosing among 3 next hops)
 agent = DDPGAgent(state_dim, action_dim)
 
+hosts = []
+stations = []
+num_stations_ap1 = 13
+num_stations_ap2 = 12
+num_stations_total = 25
+
 UDP_PORT = 12345
 PACKET_SIZE = 512
+
+def save_stations_positions(stations):
+    """Save the positions of stations to a CSV file."""
+    # File name where the positions will be stored
+    output_file = "node_positions.csv"
+
+    # Writing positions to a CSV file
+    with open(output_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        # Optionally write a header
+        writer.writerow(["x", "y", "z"])
+        # Write each position
+        for sta in stations:
+            writer.writerow(sta.position)
+
+    print(f"Node positions saved to {output_file}")
 
 def video_traffic_model():
     """Generate packet size and inter-arrival time based on a 3GPP video traffic model."""
@@ -56,8 +76,8 @@ def select_cluster_heads_by_signal_strength(stations, cluster_info):
                 total_signal_strength += signal_strength
                 
                 # Calculate distance
-                distance = sqrt((sta.params['position'][0] - other_sta.params['position'][0]) ** 2 +
-                                (sta.params['position'][1] - other_sta.params['position'][1]) ** 2)
+                distance = sqrt((sta.position[0] - other_sta.position[0]) ** 2 +
+                                (sta.position[1] - other_sta.position[1]) ** 2)
                 total_distance += distance
 
             # Normalize and compute the score: (signal_strength - distance)
@@ -113,10 +133,21 @@ def load_clusters_from_json(json_file):
         clusters = json.load(file)
     return clusters
 
+def start_udp_listener(node, port=UDP_PORT):
+    # Kill any old listeners on this port for cleanliness
+    node.cmd(f'pkill -f "nc -l.*u.* {port}"')
+    # Start a persistent UDP listener (-k) in the background
+    node.cmd(f'nohup sh -c "nc -luk {port} > /dev/null 2>&1" &')
+
 def udp_experiment(net, duration, clusters):
-    """Simulate UDP traffic using video traffic model with clustering."""
+    """
+    Run a UDP transmission experiment for all clusters.
+    - net: Mininet-WiFi network
+    - duration: experiment runtime (seconds)
+    - clusters: dict {cluster_id: [station names]}
+    """
+    """ Simulate UDP traffic using video traffic model with clustering."""
     start_time = time.time()
-    episode_rewards = []
     while time.time() - start_time < duration:
         for cluster_id, station_names in clusters.items():
             cluster_stations = [net[s] for s in station_names]
@@ -133,6 +164,7 @@ def udp_experiment(net, duration, clusters):
                 try:
                     with cluster_head.pexec(f'nc -lu {UDP_PORT}'):  # Simulate receiving at cluster head
                         sta.cmd(f'echo "X" | nc -u {cluster_head.IP()} {UDP_PORT}')
+                        print("enviando pacote")
                 except Exception as e:
                     print(f"Error in UDP transmission: {e}")
                 
@@ -140,36 +172,93 @@ def udp_experiment(net, duration, clusters):
                 transmission_delay = (end_transmission - start_transmission) * 1000  # Convert to ms
                 print(f"Transmission delay: {transmission_delay:.2f} ms")
                 
-                # Store reward for DDPG performance evaluation
-                reward = -transmission_delay  # Minimize delay
-                episode_rewards.append(reward)
-                avg_reward = np.mean(episode_rewards)
-                print(f"DDPG Avg Reward: {avg_reward:.2f}")
-                
                 time.sleep(inter_arrival_time)
+
+
+def plot_throughput(timestamps, throughput):
+    # Calculate the average throughput
+    avg_throughput = sum(throughput) / len(throughput)
+
+    # Create a plot
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # Plot throughput over time
+    ax1.plot(timestamps, throughput, color='tab:blue', marker='o', label='Throughput')
+
+    # Plot the average throughput line
+    ax1.axhline(y=avg_throughput, color='red', linestyle='--', label=f'Average Throughput: {avg_throughput:.2f} bps')
+
+    # Set labels and title
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Throughput (bps)')
+    ax1.set_title('Throughput over Time')
+
+    # Add legend
+    ax1.legend(loc='upper right')
+
+    # Display the plot
+    plt.grid(True)
+    plt.show()
 
 def topology():
     """Create and run a Mininet-WiFi topology."""
     net = Mininet_wifi(controller=None, accessPoint=OVSKernelAP)
     
     # Create stations
-    stations = [net.addStation(f'sta{i+1}', position=f'{np.random.randint(0, 500)},{np.random.randint(0, 500)},0') for i in range(25)]
+    #stations = [net.addStation(f'sta{i+1}', position=f'{np.random.randint(0, 500)},{np.random.randint(0, 500)},0') for i in range(25)]
+
+    for i in range(num_stations_total):
+        station_name = 'sta{}'.format(i+1)
+        station = net.addStation(station_name, position=f"{random.randint(10, 490)},{random.randint(10, 490)}, 0", mac='00:00:00:00:00:{}'.format(i+4), ip='10.0.0.{}/8'.format(i+4), txpower=70)
+        stations.append(station)
     
     # Create access points
-    ap1 = net.addAccessPoint('ap1', ssid='ssid', mode='g', channel='1', position='250,250,0')
+    #ap1 = net.addAccessPoint('ap1', ssid='ssid', mode='g', channel='1', position='250,250,0')
+
+    # Create and connect hosts
+    h1 = net.addHost('h1', mac='00:00:00:00:00:01', ip='10.0.0.1/8')
+    h2 = net.addHost('h2', mac='00:00:00:00:00:02', ip='10.0.0.2/8')
+    h3 = net.addHost('h3', mac='00:00:00:00:00:03', ip='10.0.0.3/8')
+
+    hosts = []
+    hosts.append(h1)
+    hosts.append(h2)
+    hosts.append(h3)    
     
+    for i, station in enumerate(stations):
+        if i < num_stations_ap1:
+            net.addLink(station, h1)
+        elif i < num_stations_ap1 + num_stations_ap2:
+            net.addLink(station, h2)
+        else:
+            net.addLink(station, h3)
+    
+    print("*** Creating and Configuring Nodes ***")
     net.configureWifiNodes()
     net.setPropagationModel(model="logDistance", exp=4.5)
+    print("*** Building network ***")
     net.build()
-    ap1.start([])
     
     # Load clusters from JSON
     clusters = load_clusters_from_json('clusters.json')
     
     # Start UDP experiment
-    udp_experiment(net, duration=60, clusters=clusters)  # Run for 60 seconds
+    net.start()
+
+    # Set the mobility model (You can choose another mobility model as needed)
+    net.startMobility(time=0, model='RandomWayPoint', max_x=100, max_y=100, min_v=0.5, max_v=1)
+
+    print("Starting experiment thread...")
+    print(stations)
+
+    # Start the experiment in a separate thread
+    experiment_thread = threading.Thread(target=udp_experiment, args=(net, 100, clusters))
+    experiment_thread.start()
+
+    # Wait for the experiment to finish
+    experiment_thread.join()
     
-    CLI(net)
+    #CLI(net)
     net.stop()
 
 if __name__ == '__main__':
